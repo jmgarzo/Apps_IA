@@ -3,8 +3,10 @@ import json
 import time
 import uuid
 import asyncio
+import logging
+import hashlib
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Dict
 
 import httpx
 from fastapi import FastAPI, HTTPException
@@ -12,6 +14,13 @@ from sse_starlette.sse import EventSourceResponse
 from pydantic import BaseModel
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
+
+# Configurar logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Cache simple en memoria para reranking
+rerank_cache: Dict[str, List[str]] = {}
 
 TMDB_BEARER = os.getenv("TMDB_BEARER_TOKEN", "")
 TMDB_API_KEY = os.getenv("TMDB_API_KEY", "")
@@ -83,10 +92,16 @@ async def tmdb_get(path: str, params: dict | None = None):
     if TMDB_API_KEY and not TMDB_BEARER:
         params.setdefault("api_key", TMDB_API_KEY)
     url = f"{TMDB_BASE}{path}"
+    
+    logger.info(f"🌐 Llamando a TMDb: {url}")
+    logger.info(f"📋 Parámetros: {params}")
+    
     async with httpx.AsyncClient(timeout=20) as client:
         r = await client.get(url, params=params, headers=tmdb_headers())
         r.raise_for_status()
-        return r.json()
+        data = r.json()
+        logger.info(f"✅ Respuesta TMDb recibida: {len(data.get('results', []))} elementos")
+        return data
 
 # ---- Ollama helper (opcional para rerank por estado de ánimo) ----
 import re
@@ -94,19 +109,30 @@ import re
 THINK_TAGS_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
 async def ollama_generate(prompt: str, model: str = MODEL_NAME) -> str:
+    logger.info(f"🤖 Llamando a Ollama con modelo: {model}")
+    logger.info(f"📝 Prompt enviado: {prompt[:200]}...")
+    
     payload = {
         "model": model,
         "prompt": prompt,
         "stream": False  # <- respuesta en un único JSON
     }
     url = f"{OLLAMA_BASE_URL}/api/generate"
-    async with httpx.AsyncClient(timeout=120) as client:
+    
+    start_time = time.time()
+    async with httpx.AsyncClient(timeout=180) as client:  # Aumentar timeout a 3 minutos
         r = await client.post(url, json=payload)
         r.raise_for_status()
         data = r.json()
         text = data.get("response", "") if isinstance(data, dict) else r.text
         # Quita bloques de pensamiento de DeepSeek-R1
-        return THINK_TAGS_RE.sub("", text).strip()
+        response = THINK_TAGS_RE.sub("", text).strip()
+        
+        elapsed = time.time() - start_time
+        logger.info(f"⏱️  Tiempo de respuesta: {elapsed:.2f}s")
+        logger.info(f"📤 Respuesta recibida: {response[:200]}...")
+        
+        return response
 
 
 # ---- Endpoints ----
@@ -148,11 +174,17 @@ async def item_details(item_id: int, type: str = "movie"):
 
 @app.get("/v1/recommendations", response_model=RecsOut)
 async def recommendations(user_id: str, limit: int = 12, mood: Optional[str] = None):
+    logger.info(f"🎬 Generando recomendaciones para usuario: {user_id}")
+    logger.info(f"📊 Parámetros: limit={limit}, mood='{mood}'")
+    
     # 1) Candidatos rápidos desde TMDb (trending)
+    logger.info("📡 Obteniendo películas trending de TMDb...")
     trending = await tmdb_get("/trending/movie/week")
     pool = trending.get("results", [])[:200]
+    logger.info(f"📈 Películas trending obtenidas: {len(pool)}")
 
     # 2) Filtra ya vistos
+    logger.info("🔍 Filtrando películas ya vistas...")
     with engine.begin() as conn:
         seen = conn.execute(
             text("SELECT item_id FROM views WHERE user_id=:u AND media_type='movie'"),
@@ -160,26 +192,63 @@ async def recommendations(user_id: str, limit: int = 12, mood: Optional[str] = N
         ).fetchall()
         seen_ids = {row[0] for row in seen}
     pool = [x for x in pool if x.get("id") not in seen_ids]
+    logger.info(f"✅ Películas después del filtro: {len(pool)}")
 
     # 3) (Opcional) Rerank por estado de ánimo con LLM
     if mood and pool:
-        top_titles = [p.get("title") or p.get("name") or str(p.get("id")) for p in pool[:50]]
-        prompt = (
-            "Eres un sistema de re-ranking. Ordena esta lista de películas del 1 al 50 según el estado de ánimo: '"
-            + mood
-            + "'.\nDevuelve solo los títulos, uno por línea, en orden.\n\n"
-            + "\n".join(top_titles)
-        )
-        try:
-            response = await ollama_generate(prompt)
-            order = [line.strip() for line in response.splitlines() if line.strip()]
-            by_title = {(p.get("title") or p.get("name")): p for p in pool[:50]}
+        logger.info(f"🎭 Aplicando reranking por estado de ánimo: '{mood}'")
+        # Reducir a 20 películas para optimizar rendimiento
+        top_titles = [p.get("title") or p.get("name") or str(p.get("id")) for p in pool[:20]]
+        logger.info(f"🎬 Títulos a rerankear: {len(top_titles)}")
+        
+        # Crear clave de cache basada en mood y títulos
+        cache_key = hashlib.md5(f"{mood}:{':'.join(top_titles)}".encode()).hexdigest()
+        
+        # Verificar cache
+        if cache_key in rerank_cache:
+            logger.info("💾 Usando resultado del cache")
+            order = rerank_cache[cache_key]
+        else:
+            prompt = (
+                f"Ordena estas películas según el estado de ánimo '{mood}'. "
+                f"Devuelve solo los títulos, uno por línea:\n\n"
+                + "\n".join(top_titles)
+            )
+            
+            try:
+                logger.info("🤖 Enviando prompt al modelo para reranking...")
+                response = await ollama_generate(prompt)
+                order = [line.strip() for line in response.splitlines() if line.strip()]
+                logger.info(f"📋 Orden recibido del modelo: {len(order)} títulos")
+                logger.info(f"🔤 Primeros 5 títulos del orden: {order[:5]}")
+                
+                # Guardar en cache
+                rerank_cache[cache_key] = order
+                logger.info("💾 Resultado guardado en cache")
+                
+            except Exception as e:
+                logger.error(f"❌ Error en reranking: {e}")
+                logger.info("⚠️  Continuando sin reranking...")
+                order = []
+        
+        if order:
+            by_title = {(p.get("title") or p.get("name")): p for p in pool[:20]}
             reranked = [by_title[t] for t in order if t in by_title]
+            logger.info(f"🔄 Películas rerankeadas: {len(reranked)}")
+            
             pool = reranked + [p for p in pool if (p.get("title") or p.get("name")) not in order]
-        except Exception:
-            pass
+            logger.info(f"✅ Pool final después del reranking: {len(pool)} películas")
+    else:
+        if not mood:
+            logger.info("ℹ️  No se especificó estado de ánimo, saltando reranking")
+        else:
+            logger.info("⚠️  No hay películas para rerankear")
 
-    return {"results": pool[:limit]}
+    final_results = pool[:limit]
+    logger.info(f"🎯 Resultado final: {len(final_results)} recomendaciones")
+    logger.info(f"🏆 Primeras 3 películas: {[r.get('title', 'Sin título') for r in final_results[:3]]}")
+    
+    return {"results": final_results}
 
 # ---- SSE: ejemplo simple ----
 @app.get("/v1/events/stream")

@@ -1,0 +1,46 @@
+# 🔧 COMANDOS PARA SOLUCIONAR LA DESCARGA DEL MODELO LLAMA 3.2 3B
+
+# PASO 1: Verificar estado del contenedor de testing
+docker logs ollama_test --tail 20
+
+# PASO 2: Descargar el modelo manualmente
+docker exec ollama_test ollama pull llama3.2:3b
+
+# PASO 3: Verificar que se descargó
+docker exec ollama_test ollama list
+
+# PASO 4: Probar generación básica
+docker exec ollama_test ollama run llama3.2:3b "Hola, ¿cómo estás?"
+
+# PASO 5: Ir al directorio de testing
+cd /home/jmgarzo/Projects/kmp/TMDB+Deepseek/testing/llama3.2-3b
+
+# PASO 6: Ejecutar comparación completa
+python3 test_alternative_models.py
+
+# COMANDOS ALTERNATIVOS (Si hay problemas):
+
+# Si el contenedor no responde:
+docker restart ollama_test
+
+# Si necesitas ver todos los logs:
+docker logs ollama_test
+
+# Si quieres ver el estado de GPU durante la descarga:
+nvidia-smi -l 1
+
+# Si quieres limpiar y empezar de nuevo:
+docker compose -f docker-compose-test.yml down
+docker compose -f docker-compose-test.yml up -d
+
+# Si quieres ver el estado de todos los contenedores:
+docker ps -a
+
+# Si quieres ver el uso de GPU:
+nvidia-smi
+
+# Si quieres ver el estado de la red:
+docker network ls
+
+# Si quieres ver los volúmenes:
+docker volume ls
