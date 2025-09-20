@@ -1,0 +1,82 @@
+version: "3.9"
+
+name: tmdb-deepseek-stack
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama_r1
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama:/root/.ollama
+    environment:
+      OLLAMA_HOST: 0.0.0.0
+      # Forzar uso de GPU
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  ollama-init:
+    image: ollama/ollama:latest
+    container_name: ollama-init
+    depends_on:
+      - ollama
+    entrypoint: ["sh","-lc"]
+    command: "sleep 10; ollama pull deepseek-r1:14b || true"
+    restart: "no"
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  db:
+    image: postgres:16
+    container_name: tmdb_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: tmdb
+      POSTGRES_USER: tmdb
+      POSTGRES_PASSWORD: tmdb
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  api:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: tmdb_api
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      OLLAMA_BASE_URL: http://ollama:11434
+      DATABASE_URL: postgresql+psycopg://tmdb:tmdb@db:5432/tmdb
+    depends_on:
+      - db
+      - ollama
+      - ollama-init
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./server:/app
+
+volumes:
+  db-data:
+  ollama:
+
