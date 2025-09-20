@@ -1,0 +1,70 @@
+# TMDB + Deepseek R1 Project Root .gitignore
+
+# ===========================================
+# Project Structure
+# ===========================================
+# This is a multi-project repository
+# Each subdirectory has its own .gitignore
+
+# ===========================================
+# Environment & Configuration
+# ===========================================
+# Environment variables
+.env
+.env.local
+.env.development
+.env.test
+.env.production
+
+# API keys and secrets
+secrets.properties
+api-keys.properties
+
+# ===========================================
+# Logs
+# ===========================================
+logs/
+*.log
+
+# ===========================================
+# Temporary folders
+# ===========================================
+tmp/
+temp/
+
+# ===========================================
+# Editor directories and files
+# ===========================================
+.vscode/
+*.swp
+*.swo
+*~
+
+# ===========================================
+# OS generated files
+# ===========================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# ===========================================
+# Backup files
+# ===========================================
+*.bak
+*.backup
+*.old
+
+# ===========================================
+# Documentation build
+# ===========================================
+docs/_build/
+site/
+
+# ===========================================
+# Custom project files
+# ===========================================
+# Add any project-specific files to ignore here
